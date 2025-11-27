@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Phasmo-Web</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        #ui {
+            position: absolute;
+            top: 10px; left: 10px;
+            color: white;
+            font-family: monospace;
+            pointer-events: none;
+            user-select: none;
+        }
+        #blocker {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            display: flex; align-items: center; justify-content: center;
+            color: white; font-family: sans-serif; cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h2>PHASMO-WEB POC</h2>
+        <p>Click to start</p>
+        <p>WASD to Move | Mouse to Look</p>
+        <p>Status: <span id="status">Connecting...</span></p>
+    </div>
+    
+    <div id="blocker">
+        <div>
+            <h1>CLICK TO PLAY</h1>
+            <p>(Enable Audio for spooky vibes - optional)</p>
+        </div>
+    </div>
+
+    <!-- Libraries -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- PointerLockControls -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const socket = io();
+        const scene = new THREE.Scene();
+        // Fog for spooky atmosphere
+        scene.fog = new THREE.FogExp2(0x111111, 0.06); 
+        
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // --- LIGHTING (The Flashlight) ---
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.2); // Dim ambient
+        scene.add(ambientLight);
+
+        const flashlight = new THREE.SpotLight(0xffffff, 1.5, 20, Math.PI/4, 0.5, 1);
+        flashlight.position.set(0, 0, 0);
+        flashlight.target.position.set(0, 0, -1);
+        camera.add(flashlight);
+        camera.add(flashlight.target);
+        scene.add(camera);
+
+        // --- ENVIRONMENT ---
+        // Floor
+        const floorGeo = new THREE.PlaneGeometry(50, 50);
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.8 });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // Random Walls (Procedural Level)
+        const wallMat = new THREE.MeshStandardMaterial({ color: 0x555555 });
+        for(let i=0; i<20; i++) {
+            const w = new THREE.Mesh(new THREE.BoxGeometry(2, 4, 2), wallMat);
+            w.position.x = (Math.random() - 0.5) * 40;
+            w.position.z = (Math.random() - 0.5) * 40;
+            w.position.y = 2;
+            w.castShadow = true;
+            w.receiveShadow = true;
+            scene.add(w);
+        }
+
+        // --- PLAYERS MANAGEMENT ---
+        const otherPlayers = {}; // Store mesh references
+        const playerGeo = new THREE.BoxGeometry(1, 2, 1);
+
+        function createPlayerMesh(color) {
+            const mat = new THREE.MeshStandardMaterial({ color: color });
+            const mesh = new THREE.Mesh(playerGeo, mat);
+            mesh.castShadow = true;
+            return mesh;
+        }
+
+        // --- GHOST ---
+        const ghostGeo = new THREE.SphereGeometry(0.8, 16, 16);
+        const ghostMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true });
+        const ghostMesh = new THREE.Mesh(ghostGeo, ghostMat);
+        ghostMesh.position.y = 1.5;
+        scene.add(ghostMesh);
+
+        // Light attached to ghost
+        const ghostLight = new THREE.PointLight(0xff0000, 1, 5);
+        ghostMesh.add(ghostLight);
+
+        // --- NETWORKING LOGIC ---
+        
+        socket.on('connect', () => {
+            document.getElementById('status').innerText = "Connected: " + socket.id;
+        });
+
+        socket.on('currentPlayers', (players) => {
+            Object.keys(players).forEach((id) => {
+                if (id === socket.id) return;
+                addOtherPlayer(id, players[id]);
+            });
+        });
+
+        socket.on('newPlayer', (data) => {
+            addOtherPlayer(data.id, data.player);
+        });
+
+        socket.on('playerMoved', (data) => {
+            if (otherPlayers[data.id]) {
+                otherPlayers[data.id].position.set(data.x, data.y, data.z);
+                otherPlayers[data.id].rotation.y = data.rotation;
+            }
+        });
+
+        socket.on('playerDisconnected', (id) => {
+            if (otherPlayers[id]) {
+                scene.remove(otherPlayers[id]);
+                delete otherPlayers[id];
+            }
+        });
+
+        socket.on('ghostUpdate', (data) => {
+            // Simple interpolation could go here for smoothness
+            ghostMesh.position.x = data.x;
+            ghostMesh.position.z = data.z;
+        });
+
+        function addOtherPlayer(id, data) {
+            const mesh = createPlayerMesh(data.color);
+            mesh.position.set(data.x, data.y, data.z);
+            scene.add(mesh);
+            otherPlayers[id] = mesh;
+        }
+
+        // --- CONTROLS & MOVEMENT ---
+        const controls = new THREE.PointerLockControls(camera, document.body);
+        const blocker = document.getElementById('blocker');
+
+        blocker.addEventListener('click', () => {
+            controls.lock();
+        });
+
+        controls.addEventListener('lock', () => {
+            blocker.style.display = 'none';
+        });
+
+        controls.addEventListener('unlock', () => {
+            blocker.style.display = 'flex';
+        });
+
+        // Movement variables
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        const onKeyDown = function (event) {
+            switch (event.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyD': moveRight = true; break;
+            }
+        };
+
+        const onKeyUp = function (event) {
+            switch (event.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyD': moveRight = false; break;
+            }
+        };
+
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keyup', onKeyUp);
+
+        // --- RENDER LOOP ---
+        let prevTime = performance.now();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = performance.now();
+            const delta = (time - prevTime) / 1000;
+
+            if (controls.isLocked === true) {
+                // Decay velocity (friction)
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize(); // Ensure consistent speed in all directions
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * 40.0 * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * 40.0 * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+
+                // Simple floor collision
+                camera.position.y = 1.6;
+
+                // Send position to server
+                // Optimization: In a real game, only send this 10-20 times a second, not every frame
+                socket.emit('playerMovement', {
+                    x: camera.position.x,
+                    y: camera.position.y,
+                    z: camera.position.z,
+                    rotation: camera.rotation.y
+                });
+            }
+
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // Handle Window Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
